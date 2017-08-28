@@ -45,6 +45,9 @@
 # include <sys/prctl.h>
 #endif
 #include <asm/unistd.h>
+#ifdef USE_LUAJIT
+# include <lua.h>
+#endif
 
 #include "number_set.h"
 #include "scno.h"
@@ -170,6 +173,11 @@ static volatile sig_atomic_t interrupted;
 static volatile int interrupted;
 #endif
 
+#ifdef USE_LUAJIT
+static lua_State *script_L = NULL;
+static void init_luajit(const char *scriptfile);
+#endif
+
 #ifndef HAVE_STRERROR
 
 #if !HAVE_DECL_SYS_ERRLIST
@@ -226,6 +234,11 @@ Output format:\n\
 #ifdef USE_LIBUNWIND
 "\
   -k             obtain stack trace between each syscall (experimental)\n\
+"
+#endif
+#ifdef USE_LUAJIT
+"\
+  -l file        run a Lua script from FILE\n\
 "
 #endif
 "\
@@ -713,7 +726,7 @@ alloctcb(int pid)
 		if (!tcp->pid) {
 			memset(tcp, 0, sizeof(*tcp));
 			tcp->pid = pid;
-#if SUPPORTED_PERSONALITIES > 1
+#if defined(USE_LUAJIT) || SUPPORTED_PERSONALITIES > 1
 			tcp->currpers = current_personality;
 #endif
 
@@ -1589,6 +1602,9 @@ init(int argc, char *argv[])
 #ifdef USE_LIBUNWIND
 		"k"
 #endif
+#ifdef USE_LUAJIT
+		"l:"
+#endif
 		"D"
 		"a:e:o:O:p:s:S:u:E:P:I:")) != EOF) {
 		switch (c) {
@@ -1697,6 +1713,11 @@ init(int argc, char *argv[])
 #ifdef USE_LIBUNWIND
 		case 'k':
 			stack_trace_enabled = true;
+			break;
+#endif
+#ifdef USE_LUAJIT
+		case 'l':
+			init_luajit(optarg);
 			break;
 #endif
 		case 'E':
@@ -2216,6 +2237,9 @@ enum trace_event {
 	 */
 	TE_SYSCALL_STOP,
 
+	/* Syscall entry or exit, after hook. */
+	TE_SYSCALL_STOP_HOOK_EXIT,
+
 	/*
 	 * Tracee received signal with number WSTOPSIG(*pstatus); signal info
 	 * is written to *si.  Restart the tracee (with that signal number
@@ -2406,24 +2430,47 @@ next_event(int *pstatus, siginfo_t *si)
 	}
 }
 
+enum hook_state {
+	HOOK_ENTER,
+	HOOK_EXIT,
+	HOOK_IGNORE,
+};
+
 static int
-trace_syscall(struct tcb *tcp, unsigned int *sig)
+trace_syscall(struct tcb *tcp, unsigned int *sig, enum hook_state state)
 {
 	if (entering(tcp)) {
-		int res = syscall_entering_decode(tcp);
-		switch (res) {
-		case 0:
-			return 0;
-		case 1:
+		int res;
+		switch (state) {
+		case HOOK_ENTER:
+		case HOOK_IGNORE:
+			res = syscall_entering_decode(tcp);
+			if (res == 0)
+				return 0;
+			if (res == 1)
+				if (state == HOOK_ENTER &&
+				    (tcp->qual_flg & QUAL_HOOK_ENTRY))
+					return RVAL_HOOKED;
+			/* Fall through */
+		case HOOK_EXIT:
 			res = syscall_entering_trace(tcp, sig);
 		}
 		syscall_entering_finish(tcp, res);
 		return res;
 	} else {
-		struct timeval tv = {};
-		int res = syscall_exiting_decode(tcp, &tv);
-		if (res != 0) {
-			res = syscall_exiting_trace(tcp, tv, res);
+		static struct timeval tv;
+		int res = 1;
+		switch (state) {
+		case HOOK_ENTER:
+		case HOOK_IGNORE:
+			res = syscall_exiting_decode(tcp, &tv);
+			if (res == 1 && state == HOOK_ENTER &&
+			    (tcp->qual_flg & QUAL_HOOK_EXIT))
+				return RVAL_HOOKED;
+			/* Fall through */
+		case HOOK_EXIT:
+			if (res != 0)
+				res = syscall_exiting_trace(tcp, tv, res);
 		}
 		syscall_exiting_finish(tcp);
 		return res;
@@ -2432,10 +2479,11 @@ trace_syscall(struct tcb *tcp, unsigned int *sig)
 
 /* Returns true iff the main trace loop has to continue. */
 static bool
-dispatch_event(enum trace_event ret, int *pstatus, siginfo_t *si)
+dispatch_event(enum trace_event ret, int *pstatus, siginfo_t *si, bool hooked)
 {
 	unsigned int restart_op = PTRACE_SYSCALL;
 	unsigned int restart_sig = 0;
+	int res;
 
 	switch (ret) {
 	case TE_BREAK:
@@ -2448,7 +2496,17 @@ dispatch_event(enum trace_event ret, int *pstatus, siginfo_t *si)
 		break;
 
 	case TE_SYSCALL_STOP:
-		if (trace_syscall(current_tcp, &restart_sig) < 0) {
+	case TE_SYSCALL_STOP_HOOK_EXIT:
+		res = trace_syscall(current_tcp, &restart_sig,
+			hooked ? (ret == TE_SYSCALL_STOP ? HOOK_ENTER : HOOK_EXIT) :
+			HOOK_IGNORE);
+
+		if (res == RVAL_HOOKED) {
+			current_tcp->flags |= TCB_HOOK;
+			return true;
+		}
+
+		if (res < 0) {
 			/*
 			 * ptrace() failed in trace_syscall().
 			 * Likely a result of process disappearing mid-flight.
@@ -2584,6 +2642,10 @@ terminate(void)
 	exit(exit_code);
 }
 
+#ifdef USE_LUAJIT
+# include "luajit.h"
+#endif
+
 int
 main(int argc, char *argv[])
 {
@@ -2591,9 +2653,14 @@ main(int argc, char *argv[])
 
 	exit_code = !nprocs;
 
+#ifdef USE_LUAJIT
+	if (script_L)
+		run_luajit();
+#endif
+
 	int status;
 	siginfo_t si;
-	while (dispatch_event(next_event(&status, &si), &status, &si))
+	while (dispatch_event(next_event(&status, &si), &status, &si, false))
 		;
 	terminate();
 }

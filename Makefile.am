@@ -107,6 +107,7 @@ strace_SOURCES =	\
 	copy_file_range.c \
 	count.c		\
 	defs.h		\
+	defs_shared.h	\
 	desc.c		\
 	dirent.c	\
 	dirent64.c	\
@@ -131,6 +132,7 @@ strace_SOURCES =	\
 	fetch_struct_stat.c \
 	fetch_struct_stat64.c \
 	fetch_struct_statfs.c \
+	ffi.h		\
 	file_handle.c	\
 	file_ioctl.c	\
 	filter_qualify.c \
@@ -328,6 +330,12 @@ strace_SOURCES += unwind.c
 strace_CPPFLAGS += $(libunwind_CPPFLAGS)
 strace_LDFLAGS += $(libunwind_LDFLAGS)
 strace_LDADD += $(libunwind_LIBS)
+endif
+
+if USE_LUAJIT
+strace_SOURCES += luajit.h
+strace_CPPFLAGS += $(LUAJIT_CFLAGS)
+strace_LDADD += $(LUAJIT_LIBS)
 endif
 
 @CODE_COVERAGE_RULES@
@@ -858,6 +866,7 @@ EXTRA_DIST =				\
 	linux/xtensa/set_scno.c		\
 	linux/xtensa/syscallent.h	\
 	linux/xtensa/userent.h		\
+	luajit_lib.lua			\
 	mpers.awk			\
 	mpers.sh			\
 	mpers_test.sh			\
@@ -883,6 +892,9 @@ $(srcdir)/.version:
 
 strace_SOURCES_c = \
 	$(filter %.c,$(strace_SOURCES)) $(filter %.c,$(libstrace_a_SOURCES))
+
+luajit_lib.h: luajit_lib.lua
+	sed 's/["\\]/\\\0/g;s/.*/"\0\\n"/' $< > $@
 
 sys_func.h: $(patsubst %,$(srcdir)/%,$(strace_SOURCES_c))
 	for f in $^; do \
@@ -962,6 +974,11 @@ CLEANFILES    = $(ioctl_redefs_h) $(ioctlent_h) $(mpers_preproc_files) \
 		ioctl_iocdef.h ioctl_iocdef.i \
 		native_printer_decls.h native_printer_defs.h printers.h sen.h sys_func.h
 DISTCLEANFILES = gnu/stubs-32.h gnu/stubs-x32.h
+
+if USE_LUAJIT
+BUILT_SOURCES += luajit_lib.h
+CLEANFILES += luajit_lib.h
+endif
 
 include scno.am
 

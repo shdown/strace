@@ -2,6 +2,7 @@ Noteworthy changes in release ?.?? (????-??-??)
 ===============================================
 
 * Improvements
+  * Added optional support for LuaJIT scripting (-l FILE option).
   * Enhanced decoding of optlen argument of getsockopt syscall.
   * Enhanced decoding of SO_LINGER option of getsockopt and setsockopt syscalls.
   * Enhanced decoding of SO_PEERCRED option of getsockopt syscall.

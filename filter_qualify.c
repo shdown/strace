@@ -40,6 +40,10 @@ static struct number_set *inject_set;
 static struct number_set *raw_set;
 static struct number_set *trace_set;
 static struct number_set *verbose_set;
+#ifdef USE_LUAJIT
+static struct number_set *hook_entry_set;
+static struct number_set *hook_exit_set;
+#endif
 
 static int
 sigstr_to_uint(const char *s)
@@ -120,28 +124,28 @@ parse_inject_token(const char *const token, struct inject_opts *const fopts,
 			fopts->step = 0;
 		}
 	} else if ((val = STR_STRIP_PREFIX(token, "error=")) != token) {
-		if (fopts->rval != INJECT_OPTS_RVAL_DEFAULT)
+		if (fopts->vals.rval != INJECT_VALS_RVAL_DEFAULT)
 			return false;
 		intval = string_to_uint_upto(val, MAX_ERRNO_VALUE);
 		if (intval < 0)
 			intval = find_errno_by_name(val);
 		if (intval < 1)
 			return false;
-		fopts->rval = -intval;
+		fopts->vals.rval = -intval;
 	} else if (!fault_tokens_only
 		   && (val = STR_STRIP_PREFIX(token, "retval=")) != token) {
-		if (fopts->rval != INJECT_OPTS_RVAL_DEFAULT)
+		if (fopts->vals.rval != INJECT_VALS_RVAL_DEFAULT)
 			return false;
 		intval = string_to_uint(val);
 		if (intval < 0)
 			return false;
-		fopts->rval = intval;
+		fopts->vals.rval = intval;
 	} else if (!fault_tokens_only
 		   && (val = STR_STRIP_PREFIX(token, "signal=")) != token) {
 		intval = sigstr_to_uint(val);
 		if (intval < 1 || intval > NSIG_BYTES * 8)
 			return false;
-		fopts->signo = intval;
+		fopts->vals.signo = intval;
 	} else {
 		return false;
 	}
@@ -239,8 +243,10 @@ qualify_inject_common(const char *const str,
 	struct inject_opts opts = {
 		.first = 1,
 		.step = 1,
-		.rval = INJECT_OPTS_RVAL_DEFAULT,
-		.signo = 0
+		.vals = {
+			.rval = INJECT_VALS_RVAL_DEFAULT,
+			.signo = 0,
+		}
 	};
 	char *buf = NULL;
 	char *name = parse_inject_expression(str, &buf, &opts, fault_tokens_only);
@@ -249,10 +255,10 @@ qualify_inject_common(const char *const str,
 	}
 
 	/* If neither of retval, error, or signal is specified, then ... */
-	if (opts.rval == INJECT_OPTS_RVAL_DEFAULT && !opts.signo) {
+	if (opts.vals.rval == INJECT_VALS_RVAL_DEFAULT && !opts.vals.signo) {
 		if (fault_tokens_only) {
 			/* in fault= syntax the default error code is ENOSYS. */
-			opts.rval = -ENOSYS;
+			opts.vals.rval = -ENOSYS;
 		} else {
 			/* in inject= syntax this is not allowed. */
 			error_msg_and_die("invalid %s '%s'", description, str);
@@ -353,17 +359,57 @@ qualify(const char *str)
 	opt->qualify(str);
 }
 
+#ifdef USE_LUAJIT
+static void
+alloc_hook_sets(void)
+{
+	if (!hook_entry_set)
+		hook_entry_set = alloc_number_set_array(
+			SUPPORTED_PERSONALITIES);
+	if (!hook_exit_set)
+		hook_exit_set = alloc_number_set_array(
+			SUPPORTED_PERSONALITIES);
+}
+
+void
+set_hook_qual(unsigned int scno, unsigned int pers, bool entry_hook,
+	      bool exit_hook)
+{
+	alloc_hook_sets();
+	if (entry_hook)
+		extend_set_array_with_number(scno, hook_entry_set, pers);
+	if (exit_hook)
+		extend_set_array_with_number(scno, hook_exit_set, pers);
+}
+
+void
+set_hook_qual_all(bool entry_hook, bool exit_hook)
+{
+	alloc_hook_sets();
+	if (entry_hook)
+		make_number_set_array_universal(hook_entry_set,
+			SUPPORTED_PERSONALITIES);
+	if (exit_hook)
+		make_number_set_array_universal(hook_exit_set,
+			SUPPORTED_PERSONALITIES);
+}
+#endif
+
 unsigned int
 qual_flags(const unsigned int scno)
 {
-	return	(is_number_in_set_array(scno, trace_set, current_personality)
-		   ? QUAL_TRACE : 0)
-		| (is_number_in_set_array(scno, abbrev_set, current_personality)
-		   ? QUAL_ABBREV : 0)
-		| (is_number_in_set_array(scno, verbose_set, current_personality)
-		   ? QUAL_VERBOSE : 0)
-		| (is_number_in_set_array(scno, raw_set, current_personality)
-		   ? QUAL_RAW : 0)
-		| (is_number_in_set_array(scno, inject_set, current_personality)
-		   ? QUAL_INJECT : 0);
+#define QUALBIT(set, qualbit) \
+	(is_number_in_set_array(scno, set, current_personality) ? qualbit : 0)
+
+	return	  QUALBIT(trace_set, QUAL_TRACE)
+		| QUALBIT(abbrev_set, QUAL_ABBREV)
+		| QUALBIT(verbose_set, QUAL_VERBOSE)
+		| QUALBIT(raw_set, QUAL_RAW)
+		| QUALBIT(inject_set, QUAL_INJECT)
+#ifdef USE_LUAJIT
+		| QUALBIT(hook_entry_set, QUAL_HOOK_ENTRY)
+		| QUALBIT(hook_exit_set, QUAL_HOOK_EXIT)
+#endif
+		;
+#undef QUALBIT
 }
