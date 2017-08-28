@@ -165,6 +165,7 @@ lookup_dcookie
 lseek
 lstat
 lstat64
+lua
 madvise
 mbind
 membarrier
